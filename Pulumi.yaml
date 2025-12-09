@@ -1,0 +1,6 @@
+name: aws-transit-gateway-hub
+runtime:
+  name: python
+  options:
+    virtualenv: venv
+description: AWS Transit Gateway hub-and-spoke architecture connecting multiple VPCs

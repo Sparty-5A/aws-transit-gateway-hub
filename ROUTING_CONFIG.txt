@@ -1,0 +1,215 @@
+# In transit_gateway_main.py
+
+# 1. Create Lab VPC attachment (AWS auto-propagates 10.200.0.0/16 to TGW RT)
+lab_attachment = tgw.create_transit_gateway_vpc_attachment(
+    name="lab-attachment",
+    transit_gateway_id=transit_gateway.id,
+    vpc_id=lab_vpc.id,
+    subnet_ids=[lab_tgw_subnet_a.id, lab_tgw_subnet_b.id]
+)
+
+# 2. Create Dev VPC attachment (AWS auto-propagates 10.201.0.0/16 to TGW RT)
+dev_attachment = tgw.create_transit_gateway_vpc_attachment(
+    name="dev-attachment",
+    transit_gateway_id=transit_gateway.id,
+    vpc_id=dev_vpc.id,
+    subnet_ids=[dev_tgw_subnet_a.id, dev_tgw_subnet_b.id]
+)
+
+# 3. YOU MUST ADD: Route in Lab VPC to reach Dev VPC
+tgw.add_tgw_route_to_vpc_route_table(
+    route_table_id=lab_route_table.id,
+    destination_cidr=dev_vpc_cidr,      # 10.201.0.0/16
+    transit_gateway_id=transit_gateway.id
+)
+
+# 4. YOU MUST ADD: Route in Dev VPC to reach Lab VPC
+tgw.add_tgw_route_to_vpc_route_table(
+    route_table_id=dev_route_table.id,
+    destination_cidr=lab_vpc_cidr,      # 10.200.0.0/16
+    transit_gateway_id=transit_gateway.id
+)
+```
+
+---
+
+## 🔍 **Why Both Are Needed**
+
+### **Packet Journey (With Route Lookups):**
+
+#### **Lab Instance → Dev Instance:**
+
+**Step 1: Lab Instance sends packet**
+```
+Source: 10.200.10.4
+Destination: 10.201.10.4
+```
+
+**Step 2: Lab VPC Route Table lookup**
+```
+Check Lab VPC Route Table:
+- Does 10.201.10.4 match 10.200.0.0/16? NO
+- Does 10.201.10.4 match 10.201.0.0/16? YES!
+  → Target: tgw-xxxxx
+
+Action: Send to Transit Gateway
+```
+**🚨 Without this route, packet would be DROPPED!**
+
+**Step 3: Packet reaches TGW (via Lab TGW Subnet ENI)**
+
+**Step 4: TGW Route Table lookup**
+```
+Check TGW Route Table:
+- Does 10.201.10.4 match 10.200.0.0/16? NO
+- Does 10.201.10.4 match 10.201.0.0/16? YES!
+  → Target: dev-vpc-attachment
+
+Action: Send to Dev VPC attachment
+```
+**✅ This route was auto-created by propagation**
+
+**Step 5: Packet enters Dev VPC (via Dev TGW Subnet ENI)**
+
+**Step 6: Dev VPC Route Table lookup**
+```
+Check Dev VPC Route Table:
+- Does 10.201.10.4 match 10.201.0.0/16? YES!
+  → Target: local
+
+Action: Deliver locally within VPC
+
+## AUTO ROUTE PROPAGATION ##
+
+transit_gateway = create_transit_gateway(
+    name="my-tgw",
+    default_route_table_association=True,   # ← Enable
+    default_route_table_propagation=True    # ← Enable
+)
+
+# Routes automatically added when you create attachments!
+# 10.200.0.0/16 → lab-attachment (automatic)
+# 10.201.0.0/16 → dev-attachment (automatic)
+
+Pros:
+
+✅ Easy, automatic
+✅ No manual TGW route management
+✅ Perfect for hub-and-spoke
+
+Cons:
+
+❌ All VPCs can reach all VPCs (no isolation)
+
+############################################################################################
+
+Question: "Do we explicitly configure routes?"
+Answer: YES, for VPC route tables (required). NO, for TGW route table (automatic if enabled).
+What you MUST configure:
+
+✅ Route in Lab VPC: 10.201.0.0/16 → tgw-xxxxx
+✅ Route in Dev VPC: 10.200.0.0/16 → tgw-xxxxx
+
+What AWS auto-configures (with propagation enabled):
+
+✅ Route in TGW RT: 10.200.0.0/16 → lab-attachment
+✅ Route in TGW RT: 10.201.0.0/16 → dev-attachment
+
+Both are needed for traffic to flow! 🎯
+
+############################################################################################
+
+## MANUAL ROUTE PROPAGATION ##
+
+transit_gateway = create_transit_gateway(
+    name="my-tgw",
+    default_route_table_association=False,  # ← Disable
+    default_route_table_propagation=False   # ← Disable
+)
+
+# Create custom route tables
+prod_rt = create_transit_gateway_route_table(
+    transit_gateway_id=transit_gateway.id,
+    name="prod-route-table"
+)
+
+dev_rt = create_transit_gateway_route_table(
+    transit_gateway_id=transit_gateway.id,
+    name="dev-route-table"
+)
+
+# Manually associate and add routes
+# (You control exactly who can reach whom)
+```
+
+**Pros:**
+- ✅ Full control
+- ✅ Can isolate Prod from Dev
+- ✅ Advanced routing scenarios
+
+**Cons:**
+- ❌ More complex
+- ❌ Must manage routes manually
+
+---
+
+## ✅ **Summary: What You Configure**
+
+### **Required (Manual - YOU must do):**
+
+**1. Lab VPC Route Table:**
+```
+10.201.0.0/16 → tgw-xxxxx
+```
+
+**2. Dev VPC Route Table:**
+```
+10.200.0.0/16 → tgw-xxxxx
+```
+
+**Without these, traffic never reaches TGW!** 🚨
+
+---
+
+### **Automatic (If enabled):**
+
+**Transit Gateway Route Table:**
+```
+10.200.0.0/16 → lab-attachment  (auto-propagated)
+10.201.0.0/16 → dev-attachment  (auto-propagated)
+```
+
+**AWS does this when you create attachments** ✅
+
+---
+
+## 🎨 **Updated Diagram Idea**
+
+You could add route table annotations:
+```
+┌─────────────────────────────┐
+│ Lab VPC                     │
+│                             │
+│ Route Table:                │
+│ • 10.201.0.0/16 → TGW       │ ← Show this!
+│                             │
+│ [Workload Subnet]           │
+│ [TGW Subnets]               │
+└─────────────────────────────┘
+        │
+        ↓
+  Transit Gateway
+  Route Table:
+  • 10.200/16 → Lab (auto)    ← Show this!
+  • 10.201/16 → Dev (auto)
+        │
+        ↓
+┌─────────────────────────────┐
+│ Dev VPC                     │
+│                             │
+│ Route Table:                │
+│ • 10.200.0.0/16 → TGW       │ ← Show this!
+│                             │
+│ [Workload Subnet]           │
+│ [TGW Subnets]               │
+└─────────────────────────────┘

@@ -1,0 +1,220 @@
+Interviewer: "How does traffic flow between VPCs through Transit Gateway?"
+
+Your answer: "Traffic flows logically from EC2 instance to EC2 instance, but the actual
+path traverses through dedicated Transit Gateway subnets in each VPC. AWS places ENIs in
+these TGW subnets, and the VPC route tables direct inter-VPC traffic to the Transit
+Gateway attachment. The packet physically travels from the source workload subnet,
+through the source VPC's TGW subnet ENI, into the Transit Gateway hub, then out
+through the destination VPC's TGW subnet ENI, and finally to the destination workload
+subnet. This architecture provides high availability since we have TGW subnets in multiple AZs."
+
+# Lab VPC Attachment
+lab_attachment = tgw.create_transit_gateway_vpc_attachment(
+    name="lab-tgw-attachment",
+    transit_gateway_id=transit_gateway.id,
+    vpc_id=lab_vpc.id,
+    subnet_ids=[
+        lab_tgw_subnet_a.id,  # In us-east-1a
+        lab_tgw_subnet_b.id,  # In us-east-1b
+    ]
+)
+```
+
+---
+
+## 🌐 **What AWS Creates**
+
+### **Behind the Scenes:**
+
+When you attach a VPC to Transit Gateway:
+
+1. **AWS creates ENIs (Elastic Network Interfaces):**
+   - 1 ENI in TGW Subnet A (us-east-1a)
+   - 1 ENI in TGW Subnet B (us-east-1b)
+
+2. **These ENIs are the "connection points":**
+   - Traffic from Lab VPC → ENI in TGW Subnet A → Transit Gateway
+   - Or Traffic from Lab VPC → ENI in TGW Subnet B → Transit Gateway
+
+3. **High Availability:**
+   - If AZ-A fails, traffic routes through AZ-B
+   - Both ENIs are always active (not active/standby)
+
+---
+
+## 📊 **Visual Representation**
+
+### **Physical Layout:**
+```
+                    Transit Gateway (Regional Service)
+                            │
+        ┌───────────────────┼───────────────────┐
+        │                   │                   │
+   [us-east-1a]        [us-east-1b]        [us-east-1c]
+        │                   │
+        │                   │
+Lab VPC │              Lab VPC │
+TGW Subnet A           TGW Subnet B
+10.200.255.0/24        10.200.254.0/24
+    │                      │
+    └──────────────────────┘
+         Lab VPC
+       10.200.0.0/16
+```
+
+### **Each VPC Has:**
+```
+Lab VPC:
+  ├── Workload Subnet (10.200.10.0/24) → us-east-1a
+  ├── TGW Subnet A (10.200.255.0/24) → us-east-1a ← ENI here
+  └── TGW Subnet B (10.200.254.0/24) → us-east-1b ← ENI here
+
+Dev VPC:
+  ├── Workload Subnet (10.201.10.0/24) → us-east-1a
+  ├── TGW Subnet A (10.201.255.0/24) → us-east-1a ← ENI here
+  └── TGW Subnet B (10.201.254.0/24) → us-east-1b ← ENI here
+```
+
+---
+
+## 🎯 **The "Pair" Concept**
+
+### **There Are Two Ways to Think About "Pairs":**
+
+#### **Interpretation 1: Per-VPC Pair**
+
+**Lab VPC has a PAIR of TGW subnets:**
+- TGW Subnet A (AZ-A)
+- TGW Subnet B (AZ-B)
+
+**Dev VPC has a PAIR of TGW subnets:**
+- TGW Subnet A (AZ-A)
+- TGW Subnet B (AZ-B)
+
+**This is correct!** Each VPC needs TGW subnets in multiple AZs for HA.
+
+---
+
+#### **Interpretation 2: Cross-VPC Pair** ❌ (Not What Happens)
+
+**This would be WRONG:**
+- Lab TGW Subnet A + Dev TGW Subnet A = "Pair in AZ-A"
+- Lab TGW Subnet B + Dev TGW Subnet B = "Pair in AZ-B"
+
+**Why wrong?** They're not paired with each other. Each VPC attachment is independent.
+
+---
+
+## 📐 **Attachment Structure**
+
+### **What Actually Exists:**
+```
+Transit Gateway (Regional)
+    │
+    ├── Lab VPC Attachment
+    │   ├── ENI in Lab TGW Subnet A (us-east-1a)
+    │   └── ENI in Lab TGW Subnet B (us-east-1b)
+    │
+    └── Dev VPC Attachment
+        ├── ENI in Dev TGW Subnet A (us-east-1a)
+        └── ENI in Dev TGW Subnet B (us-east-1b)
+```
+
+**Key Point:** Each attachment is independent!
+
+---
+
+## 🔄 **Traffic Flow Example**
+
+### **When Lab Instance (10.200.10.4) pings Dev Instance (10.201.10.4):**
+
+**Path 1 (via AZ-A):**
+```
+Lab Instance (10.200.10.4)
+    ↓
+Lab Workload Subnet (10.200.10.0/24) in us-east-1a
+    ↓ (Route: 10.201.0.0/16 → tgw-xxxxx)
+Lab TGW Subnet A (10.200.255.0/24) in us-east-1a
+    ↓ (ENI here)
+Transit Gateway (regional service)
+    ↓ (Route table: 10.201.0.0/16 → dev-attachment)
+Dev TGW Subnet A (10.201.255.0/24) in us-east-1a
+    ↓ (ENI here)
+Dev Workload Subnet (10.201.10.0/24) in us-east-1a
+    ↓
+Dev Instance (10.201.10.4)
+```
+
+**Path 2 (via AZ-B - if AZ-A fails):**
+```
+Lab Instance (10.200.10.4)
+    ↓
+Transit Gateway (uses ENI in Lab TGW Subnet B)
+    ↓
+Dev Instance (via ENI in Dev TGW Subnet B)
+```
+
+---
+
+## 🏗️ **Why This Architecture?**
+
+### **High Availability:**
+
+**Scenario 1: Normal Operation**
+- Both AZs active
+- AWS load balances across ENIs
+
+**Scenario 2: AZ-A Fails**
+- Lab TGW Subnet A (AZ-A) ❌ Down
+- Lab TGW Subnet B (AZ-B) ✅ Still works
+- Traffic automatically routes through AZ-B
+
+**Scenario 3: AZ-B Fails**
+- Lab TGW Subnet B (AZ-B) ❌ Down
+- Lab TGW Subnet A (AZ-A) ✅ Still works
+- Traffic automatically routes through AZ-A
+
+**No single AZ failure breaks connectivity!** ✅
+
+---
+
+## 📊 **Updated Diagram**
+
+### **To Make AZ Placement Clearer:**
+
+Add AZ labels to your diagram:
+```
+┌─────────────────────────────────────┐
+│ Lab VPC                             │
+│                                     │
+│  ┌──────────────────┐               │
+│  │ Workload Subnet  │  (us-east-1a) │
+│  └──────────────────┘               │
+│                                     │
+│  ┌──────────┐ ┌──────────┐          │
+│  │ TGW      │ │ TGW      │          │
+│  │ Subnet A │ │ Subnet B │          │
+│  │.255/24   │ │.254/24   │          │
+│  │(AZ-A)    │ │(AZ-B)    │ ← Add these!
+│  └──────────┘ └──────────┘          │
+└─────────────────────────────────────┘
+```
+
+**This makes the multi-AZ architecture explicit!**
+
+---
+
+## ✅ **Summary:**
+
+**Correct interpretation:**
+- ✅ Lab VPC has 2 TGW subnets (one in AZ-A, one in AZ-B)
+- ✅ Dev VPC has 2 TGW subnets (one in AZ-A, one in AZ-B)
+- ✅ Each TGW subnet is in a different AZ (for HA)
+
+**Architecture:**
+```
+Lab VPC TGW Subnet A (10.200.255.0/24) → us-east-1a
+Lab VPC TGW Subnet B (10.200.254.0/24) → us-east-1b
+
+Dev VPC TGW Subnet A (10.201.255.0/24) → us-east-1a
+Dev VPC TGW Subnet B (10.201.254.0/24) → us-east-1b
