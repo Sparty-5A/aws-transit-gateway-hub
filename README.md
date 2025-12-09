@@ -597,6 +597,4 @@ For questions or discussions about this project:
 
 ---
 
-**Built with ❤️ for learning AWS networking**
-
 **Remember: Always destroy AWS resources after testing to avoid unnecessary costs!**
